@@ -43,7 +43,7 @@ GOAL_RADIUS = UAV_RADIUS  # Radius of the Goal
 VIEWPORT_W = 600
 VIEWPORT_H = 400
 WALL_THICKNESS = 10. / SCALE # Thickness of the walls
-NUM_OBSTACLES = 3  # Number of obstacles
+NUM_OBSTACLES = 10  # Number of obstacles
 OBS_MAX_RAD = min(VIEWPORT_W, VIEWPORT_H) / SCALE / OBSTACLE_SCALE # Maximum radius of obstacles
 OBS_MIN_RAD = OBS_MAX_RAD / 3  # Minimum radius of obstacles
 MIN_CLEARANCE = UAV_RADIUS * 3  # Minimum clearance between obstacles
@@ -62,7 +62,7 @@ UAV_THRUST_POW = 100 / SCALE  # Maximum thrust (Unit/s?)
 
 # Action/State
 ACTION_SPACE = 4
-STATE_SPACE = 7 + UAV_NUM_RAYS
+STATE_SPACE = 5 + UAV_NUM_RAYS
 
 # Penalty/Reward coeff
 PEN_THRUST = -0.1/FPS
@@ -249,8 +249,8 @@ class SimpleUAVEnv(gym.Env):
     def _relu_penalty(self, distance, offset=OBS_OFFSET, max_penalty=PEN_COLLISION):
         # Adjust distance by offset and scale
         adjusted_distance = (offset - distance) / (offset-UAV_RADIUS)
-        silu_output = adjusted_distance / (1 + np.exp(-adjusted_distance))
-        return max(silu_output * -max_penalty, 0)
+        relu_output = adjusted_distance / (1 + np.exp(-adjusted_distance))
+        return max(relu_output * -max_penalty, 0)
 
     def _leakyrelu_penalty(self, distance, leaky_slope=0.001, offset=OBS_OFFSET, max_penalty=PEN_COLLISION):
         adjusted_distance = (offset - distance) / (offset-UAV_RADIUS)
@@ -364,8 +364,8 @@ class SimpleUAVEnv(gym.Env):
         state = np.array([
             #(pos.x - VIEWPORT_W / SCALE / 2) / (VIEWPORT_W / SCALE / 2),
             #(pos.y - VIEWPORT_H / SCALE / 2) / (VIEWPORT_H / SCALE / 2),
-            (self.goal[0]-pos.x) / (VIEWPORT_W / SCALE / 2),
-            (self.goal[1]-pos.y) / (VIEWPORT_H / SCALE / 2),
+            #(self.goal[0]-pos.x) / (VIEWPORT_W / SCALE / 2),
+            #(self.goal[1]-pos.y) / (VIEWPORT_H / SCALE / 2),
             vel.x * (VIEWPORT_W / SCALE / 2) / FPS,
             vel.y * (VIEWPORT_H / SCALE / 2) / FPS,
             self.uav.angle,
