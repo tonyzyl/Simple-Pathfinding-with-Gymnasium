@@ -667,49 +667,75 @@ class ResNet(torch.nn.Module):
         x = self.final_layer(nn.functional.silu(x))
         return x
 
-class DQN(torch.nn.Module):
-    '''
-    This class defines a deep Q-network (DQN), a type of artificial neural network used in reinforcement learning.
-    The DQN is used to estimate the Q-values, which represent the expected return for each action in each state.
-    
-    Parameters
-    ----------
-    state_size: int, default=8
-        The size of the state space.
-    action_size: int, default=4
-        The size of the action space.
-    hidden_size: int, default=64
-        The size of the hidden layers in the network.
-    '''
-    def __init__(self, state_size=8, action_size=4, hidden_size=64):
-        '''
-        Initialize a network with the following architecture:
-            Input layer (state_size, hidden_size)
-            Hidden layer 1 (hidden_size, hidden_size)
-            Output layer (hidden_size, action_size)
-        '''
-        super(DQN, self).__init__()
-        self.layer1 = torch.nn.Linear(state_size, hidden_size)
-        self.layer2 = torch.nn.Linear(hidden_size, hidden_size)
-        self.layer3 = torch.nn.Linear(hidden_size, action_size)
+class PureResNetBlock(torch.nn.Module):
+    def __init__(self, in_dim, out_dim, dropout=0,
+                 skip_scale=1, adaptive_scale=True, affine=False):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.dropout = dropout
+        self.skip_scale = skip_scale
+        self.adaptive_scale = adaptive_scale
 
-    def forward(self, state):
-        '''
-        Define the forward pass of the DQN. This function is called when the network is called to estimate Q-values.
-        
-        Parameters
-        ----------
-        state: torch.Tensor
-            The state for which to estimate the Q-values.
+        self.linear = nn.Linear(in_dim, out_dim)
 
-        Returns
-        -------
-        torch.Tensor
-            The estimated Q-values for each action in the input state.
-        '''
-        x = torch.nn.functional.silu(self.layer1(state))
-        x = torch.nn.functional.silu(self.layer2(x))
-        return self.layer3(x)
+        if affine:
+            self.pre_norm = Affine(in_dim)
+            self.post_norm = Affine(out_dim)
+        else:
+            self.pre_norm = nn.Identity()
+            self.post_norm = nn.Identity()
+
+    def forward(self, x):
+        #print(x.shape, emb.shape)
+        orig = x
+        x = self.pre_norm(x)
+        x = self.linear(nn.functional.dropout(x, p=self.dropout, training=self.training))
+        x = self.post_norm(x)
+        x = x.add_(orig)
+        x = x * self.skip_scale
+        return x
+
+class PureResNet(torch.nn.Module):
+    def __init__(self, in_dim, out_dim,
+                model_dim      = 128,      # dim multiplier.
+                dim_mult        = [1,1,1],# dim multiplier for each resblock layer.
+                dim_mult_emb    = 4,
+                num_blocks          = 2,        # Number of resblocks(mid) per level.
+                dropout             = 0.,      # Dropout rate.
+                emb_type            = "sinusoidal",# Timestep embedding type
+                dim_mult_noise  = 1,        # Time embedding size
+                adaptive_scale  = True,     # Feature-wise transformations, FiLM
+                skip_scale      = 1.0,      # Skip connection scaling
+                affine          = True    # Affine normalization for MLP
+                ):
+
+        super().__init__()
+
+        block_kwargs = dict(dropout = dropout, skip_scale=skip_scale, adaptive_scale=adaptive_scale, affine=affine)
+
+        #self.map_layer = nn.Linear(noise_dim, emb_dim)
+        #self.map_layer1 = nn.Linear(emb_dim, emb_dim)
+
+        self.state_dim = in_dim
+
+        self.first_layer = nn.Linear(self.state_dim, model_dim)
+        self.blocks = nn.ModuleList()
+        cout = model_dim
+        for level, mult in enumerate(dim_mult):
+            for _ in range(num_blocks):
+                cin = cout
+                cout = model_dim * mult
+                self.blocks.append(PureResNetBlock(cin, cout, **block_kwargs))
+        self.final_layer = nn.Linear(cout, out_dim)
+
+    def forward(self, x):
+        x = self.first_layer(x)
+        for block in self.blocks:
+            x = block(x)
+        x = self.final_layer(x)
+        x = nn.Softmax(dim=1)(x)
+        return x
 
 class ReplayBuffer:
     '''
@@ -796,7 +822,7 @@ class DQNAgent:
         The batch size for learning from the replay memory.
     '''
     def __init__(self, state_size=8, action_size=4, hidden_size=64, 
-                 learning_rate=1e-4, gamma=0.99, buffer_size=10000, batch_size=512):
+                 learning_rate=1e-4, gamma=0.99, buffer_size=10000, batch_size=512, type='conv'):
         # Select device to train on (if CUDA available, use it, otherwise use CPU)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         #self.device = torch.device("cpu")
@@ -812,10 +838,14 @@ class DQNAgent:
 
         # Initialize the Q-Network and Target Network with the given state size, action size and hidden layer size
         # Move the networks to the selected device
-        #self.q_network = DQN(state_size, action_size, hidden_size).to(self.device)
-        #self.target_network = DQN(state_size, action_size, hidden_size).to(self.device)
-        self.q_network = ResNet(state_size, action_size).to(self.device)
-        self.target_network = ResNet(state_size, action_size).to(self.device)
+        if type == 'conv':
+            self.q_network = ResNet(state_size, action_size).to(self.device)
+            self.target_network = ResNet(state_size, action_size).to(self.device)
+        elif type == 'pure':
+            self.q_network = PureResNet(state_size, action_size).to(self.device)
+            self.target_network = PureResNet(state_size, action_size).to(self.device)
+        else:
+            raise NotImplementedError
         
         # Set weights of target network to be the same as those of the q network
         self.target_network.load_state_dict(self.q_network.state_dict())
@@ -927,6 +957,48 @@ class DQNAgent:
         '''
         self.target_network.load_state_dict(self.q_network.state_dict())
 
+    def save(self, filepath):
+        '''
+        Save the model parameters and optimizer state.
+
+        Parameters
+        ----------
+        filepath: str
+            The file path where the model should be saved.
+        '''
+        checkpoint = {
+            'q_network_state_dict': self.q_network.state_dict(),
+            'target_network_state_dict': self.target_network.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'agent_params': {
+                'gamma': self.gamma,
+                'batch_size': self.batch_size,
+                'action_size': self.action_size
+                # Add other parameters as needed
+            }
+        }
+        torch.save(checkpoint, filepath)
+
+    def load(self, filepath):
+        '''
+        Load the model parameters and optimizer state.
+
+        Parameters
+        ----------
+        filepath: str
+            The file path from where the model should be loaded.
+        '''
+        checkpoint = torch.load(filepath, map_location=self.device)
+        self.q_network.load_state_dict(checkpoint['q_network_state_dict'])
+        self.target_network.load_state_dict(checkpoint['target_network_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        # Load other agent parameters if necessary
+        agent_params = checkpoint.get('agent_params', {})
+        self.gamma = agent_params.get('gamma', self.gamma)
+        self.batch_size = agent_params.get('batch_size', self.batch_size)
+        self.action_size = agent_params.get('action_size', self.action_size)
+
 def train(agent, env, n_episodes=2000, n_max_step=1000, eps_start=1.0, eps_end=0.01, eps_decay=0.995, target_update=10, print_every=10):
     '''
     Train a DQN agent.
@@ -955,10 +1027,13 @@ def train(agent, env, n_episodes=2000, n_max_step=1000, eps_start=1.0, eps_end=0
     '''
 
     # Initialize the scores list and scores window
-    scores = []
+    mean_scores = []
+    mean_steps = []
+    mean_success_rate = []
     scores_window = deque(maxlen=100)
+    steps_window = deque(maxlen=100)
+    success_window = deque(maxlen=100)
     eps = eps_start
-    final_states_images = []
 
     # Loop over episodes
     for i_episode in range(1, n_episodes + 1):
@@ -988,17 +1063,24 @@ def train(agent, env, n_episodes=2000, n_max_step=1000, eps_start=1.0, eps_end=0
                 break 
         if n_step == n_max_step - 1:
             score += PEN_NOT_FINISHED
+        if env.game_over:
+            success_window.append(0)
+        else:
+            success_window.append(1)
 
         #print(f"Episode {i_episode}\tScore: {score:.2f}, done: {done}, final reward: {reward}") 
         # At the end of episode append and save scores
         scores_window.append(score)
-        scores.append(score) 
+        steps_window.append(n_step)
+        mean_scores.append(np.mean(score))
+        mean_steps.append(np.mean(n_step))
+        mean_success_rate.append(np.mean(success_window))
 
         # Decrease epsilon
         eps = max(eps_end, eps_decay * eps)
 
         # Print some info
-        print(f"\rEpisode {i_episode}\tAverage Score: {np.mean(scores_window):.2f}", end="")
+        print(f"\rEpisode {i_episode}\tAverage Score: {np.mean(scores_window):.2f}\tSuccess rate: {np.mean(success_window):.2f}", end="")
 
         # Update target network every target_update episodes
         if i_episode % target_update == 0:
@@ -1007,16 +1089,10 @@ def train(agent, env, n_episodes=2000, n_max_step=1000, eps_start=1.0, eps_end=0
         # Print average score every 100 episodes
         if i_episode % print_every == 0:
             frame = env.render()
-            final_states_images.append(frame)
             env.close()
             plt.imshow(frame)
             plt.show()
-            print('\rEpisode {}\tAverage Score: {:.2f}, Eps: {:.3f}, Terminal vel: {:.3f}, angle:{:.2f}, dist2goal: {:.2f}, ang2goal: {:.2f}, step: {}'
-                  .format(i_episode, np.mean(scores_window), eps, np.linalg.norm(env.uav.linearVelocity), env.uav.angle, env.dist2goal, env.ang2goal, n_step))
+            print('\rEpisode {}\tAverage Score: {:.2f}, Eps: {:.3f}, Terminal vel: {:.3f}, angle:{:.2f}, dist2goal: {:.2f}, ang2goal: {:.2f}, step: {}, success rate: {:.2f}'
+                  .format(i_episode, np.mean(scores_window), eps, np.linalg.norm(env.uav.linearVelocity), env.uav.angle, env.dist2goal, env.ang2goal, n_step, np.mean(success_window)))
         
-        # This environment is considered to be solved for a mean score of 200 or greater, so stop training.
-        if i_episode % 100 == 0 and np.mean(scores_window) >= 200:
-            break
-            
-
-    return scores, final_states_images
+    return mean_scores, mean_steps
