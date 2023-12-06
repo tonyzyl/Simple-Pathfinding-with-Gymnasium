@@ -36,7 +36,7 @@ import pickle
 
 # Constants
 FPS = 50
-SCALE = 10.0  # Scaling for visualization
+SCALE = 20.0  # Scaling for visualization
 OBSTACLE_SCALE = 5.0  # Scaling for obstacles
 UAV_RADIUS = 10.0 / SCALE  # Radius of the UAV
 GOAL_RADIUS = UAV_RADIUS  # Radius of the Goal
